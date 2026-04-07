@@ -8,14 +8,18 @@ REQUIRES = [
   'helics~=3.6.1',
   'numpy',
   'pandas',
+  'pymodbus>=3.0',
   'pyzmq',
   'requests',
+  'scipy',
   'windpowerlib',
 ]
 
 SCRIPTS = [
+  'ot-sim-battery-model-module = otsim.battery_model.battery_model:main',
   'ot-sim-ground-truth-module = otsim.ground_truth.ground_truth:main',
   'ot-sim-io-module = otsim.io.io:main',
+  'ot-sim-meter-sim-module = otsim.meter_sim.meter_sim:main',
   'ot-sim-wind-turbine-anemometer-module = otsim.wind_turbine.anemometer.anemometer:main',
   'ot-sim-wind-turbine-power-output-module = otsim.wind_turbine.power_output.power_output:main',
 ]
