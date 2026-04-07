@@ -1,0 +1,172 @@
+<?xml version="1.0"?>
+<ot-sim>
+  <message-bus>
+    <pull-endpoint>tcp://127.0.0.1:1234</pull-endpoint>
+    <pub-endpoint>tcp://127.0.0.1:5678</pub-endpoint>
+  </message-bus>
+
+  <cpu>
+    <module name="backplane">ot-sim-message-bus {{config_file}}</module>
+    <module name="battery">ot-sim-battery-model-module {{config_file}}</module>
+    <module name="meter">ot-sim-meter-sim-module {{config_file}}</module>
+    <module name="modbus">ot-sim-modbus-module {{config_file}}</module>
+    <module name="telnet">ot-sim-telnet-module {{config_file}}</module>
+  </cpu>
+
+  <!--
+    Battery Model
+    =============
+    Simulates a 660 kWh / 400 V lithium-ion battery pack (physics-based cell
+    model).  The module publishes voltage, current, and state-of-charge every
+    <dt> seconds and optionally accepts a current setpoint via OT-sim Update
+    messages on <current-tag>.
+
+    initial-soc : starting state-of-charge (0.0–1.0)
+    dt          : simulation timestep in seconds (also the publish interval)
+    current-tag : tag whose Update values drive the charge/discharge current (A)
+                  positive = discharging, negative = charging
+    voltage-tag     : published terminal voltage (V)
+    current-out-tag : published actual current (A)
+    soc-tag         : published state-of-charge (0.0–1.0)
+  -->
+  <battery-model name="bess-1">
+    <initial-soc>0.8</initial-soc>
+    <dt>1</dt>
+    <current-tag>bess-1.current-cmd</current-tag>
+    <voltage-tag>bess-1.voltage</voltage-tag>
+    <current-out-tag>bess-1.current</current-out-tag>
+    <soc-tag>bess-1.soc</soc-tag>
+  </battery-model>
+
+  <!--
+    Meter Simulator
+    ===============
+    Simulates a three-phase power meter.  Readings are published to the OT-sim
+    message bus and exposed as Modbus TCP holding registers (float32 big-endian,
+    two registers per value) starting at address 0:
+
+      HR 0–1   : voltage L1 (V)
+      HR 2–3   : voltage L2 (V)
+      HR 4–5   : voltage L3 (V)
+      HR 6–7   : current L1 (A)
+      HR 8–9   : current L2 (A)
+      HR 10–11 : current L3 (A)
+      HR 12–13 : total active power (kW)
+      HR 14–15 : power factor
+      HR 16–17 : frequency (Hz)
+      HR 18–19 : energy (kWh, cumulative)
+
+    listen-address  : IP to bind the Modbus TCP server
+    port            : Modbus TCP port
+    unit-id         : Modbus unit / slave ID
+    update-interval : seconds between meter reading updates
+  -->
+  <meter-sim name="meter-1">
+    <listen-address>0.0.0.0</listen-address>
+    <port>5020</port>
+    <unit-id>1</unit-id>
+    <update-interval>1</update-interval>
+    <tags>
+      <voltage-l1>meter-1.voltage-l1</voltage-l1>
+      <voltage-l2>meter-1.voltage-l2</voltage-l2>
+      <voltage-l3>meter-1.voltage-l3</voltage-l3>
+      <current-l1>meter-1.current-l1</current-l1>
+      <current-l2>meter-1.current-l2</current-l2>
+      <current-l3>meter-1.current-l3</current-l3>
+      <active-power>meter-1.active-power</active-power>
+      <power-factor>meter-1.power-factor</power-factor>
+      <frequency>meter-1.frequency</frequency>
+      <energy>meter-1.energy</energy>
+    </tags>
+  </meter-sim>
+
+  <!--
+    Modbus outstation exposing battery and meter tags to external clients.
+
+    Battery registers (read-only float32, use: mbpoll -0 -1 -t 3 -r <addr> -c 2 -p 5502 localhost):
+      IR 30000–30001 : bess-1.voltage      (V,   float32)
+      IR 30002–30003 : bess-1.current      (A,   float32)
+      IR 30004–30005 : bess-1.soc          (0–1, float32)
+
+    Battery current setpoint (read/write coil drives current-cmd update):
+      Coil 0 : bess-1.current-cmd  (1 = discharge, 0 = idle)
+      Write : mbpoll -0 -1 -t 0 -r 0 -p 5502 localhost 1
+
+    Meter registers (read-only float32):
+      IR 30010–30011 : meter-1.voltage-l1   (V)
+      IR 30012–30013 : meter-1.voltage-l2   (V)
+      IR 30014–30015 : meter-1.voltage-l3   (V)
+      IR 30016–30017 : meter-1.current-l1   (A)
+      IR 30018–30019 : meter-1.current-l2   (A)
+      IR 30020–30021 : meter-1.current-l3   (A)
+      IR 30022–30023 : meter-1.active-power (kW)
+      IR 30024–30025 : meter-1.power-factor
+      IR 30026–30027 : meter-1.frequency    (Hz)
+  -->
+  <modbus name="modbus-outstation" mode="server">
+    <endpoint>0.0.0.0:5502</endpoint>
+
+    <!-- battery: write coil to command a discharge current -->
+    <register type="coil">
+      <address>0</address>
+      <tag>bess-1.current-cmd</tag>
+    </register>
+
+    <!-- battery: read-only status -->
+    <register type="input" data-type="float">
+      <address>30000</address>
+      <tag>bess-1.voltage</tag>
+    </register>
+    <register type="input" data-type="float">
+      <address>30002</address>
+      <tag>bess-1.current</tag>
+    </register>
+    <register type="input" data-type="float">
+      <address>30004</address>
+      <tag>bess-1.soc</tag>
+    </register>
+
+    <!-- meter: read-only status -->
+    <register type="input" data-type="float">
+      <address>30010</address>
+      <tag>meter-1.voltage-l1</tag>
+    </register>
+    <register type="input" data-type="float">
+      <address>30012</address>
+      <tag>meter-1.voltage-l2</tag>
+    </register>
+    <register type="input" data-type="float">
+      <address>30014</address>
+      <tag>meter-1.voltage-l3</tag>
+    </register>
+    <register type="input" data-type="float">
+      <address>30016</address>
+      <tag>meter-1.current-l1</tag>
+    </register>
+    <register type="input" data-type="float">
+      <address>30018</address>
+      <tag>meter-1.current-l2</tag>
+    </register>
+    <register type="input" data-type="float">
+      <address>30020</address>
+      <tag>meter-1.current-l3</tag>
+    </register>
+    <register type="input" data-type="float">
+      <address>30022</address>
+      <tag>meter-1.active-power</tag>
+    </register>
+    <register type="input" data-type="float">
+      <address>30024</address>
+      <tag>meter-1.power-factor</tag>
+    </register>
+    <register type="input" data-type="float">
+      <address>30026</address>
+      <tag>meter-1.frequency</tag>
+    </register>
+  </modbus>
+
+  <telnet name="battery-meter-telnet">
+    <endpoint>:23</endpoint>
+    <banner>default</banner>
+  </telnet>
+</ot-sim>
