@@ -10,37 +10,48 @@ module.exports = function(RED) {
 
     var node = this;
 
-    node.endpoint = 'tcp://localhost:5678';
+    var endpoint = 'tcp://localhost:5678';
 
     if (RED.settings.otsim && RED.settings.otsim.pub) {
-      node.endpoint = RED.settings.otsim.pub;
+      endpoint = RED.settings.otsim.pub;
     }
 
-    node.sock = zmq.socket('sub');
+    var sock = new zmq.Subscriber();
 
-    node.sock.connect(node.endpoint);
-    node.sock.subscribe('RUNTIME');
+    (async function() {
+      await sock.connect(endpoint);
+      sock.subscribe('RUNTIME');
 
-    node.status({fill: "green", shape: "ring", text: "subscribing"});
+      node.status({fill: "green", shape: "ring", text: "subscribing"});
 
-    node.sock.on('message', function(topic, msg) {
-      msg = JSON.parse(msg.toString());
+      for await (const [topic, msg] of sock) {
+        var parsed = JSON.parse(msg.toString());
 
-      if (msg.kind === 'Status') {
-        for (const m of msg.contents.measurements) {
-          if (m.tag === node.tag) {
-            node.send({topic: node.tag, payload: m.value});
+        if (parsed.kind === 'Status') {
+          for (const m of parsed.contents.measurements) {
+            if (m.tag === node.tag) {
+              node.send({topic: node.tag, payload: m.value});
+            }
+          }
+        }
+
+        if (node.updates && parsed.kind === 'Update') {
+          for (const u of parsed.contents.updates) {
+            if (u.tag === node.tag) {
+              node.send({payload: u.value});
+            }
           }
         }
       }
-
-      if (node.updates && msg.kind === 'Update') {
-        for (const u of msg.contents.updates) {
-          if (u.tag === node.tag) {
-            node.send({payload: u.value});
-          }
-        }
+    })().catch(function(err) {
+      if (!sock.closed) {
+        node.error(err);
       }
+    });
+
+    node.on('close', function(done) {
+      sock.close();
+      done();
     });
   }
 
@@ -52,18 +63,18 @@ module.exports = function(RED) {
     this.tag = config.tag;
     var node = this;
 
-    node.endpoint = 'tcp://localhost:1234';
+    var endpoint = 'tcp://localhost:1234';
 
     if (RED.settings.otsim && RED.settings.otsim.pull) {
-      node.endpoint = RED.settings.otsim.pull;
+      endpoint = RED.settings.otsim.pull;
     }
 
-    node.sock = zmq.socket('push');
+    var sock = new zmq.Push();
+    sock.linger = 0;
 
-    node.sock.connect(node.endpoint);
-    node.sock.setsockopt(zmq.ZMQ_LINGER, 0);
-
-    node.status({fill: "yellow", shape: "ring", text: "idle"});
+    sock.connect(endpoint).then(function() {
+      node.status({fill: "yellow", shape: "ring", text: "idle"});
+    });
 
     node.on('input', function(msg) {
       var value = parseFloat(msg.payload);
@@ -90,11 +101,20 @@ module.exports = function(RED) {
           recipient: '',
           confirm:   ''
         }
-      }
+      };
 
       node.status({fill: "green", shape: "ring", text: "updating"});
-      node.sock.send(['RUNTIME', JSON.stringify(update)])
-      node.status({fill: "yellow", shape: "ring", text: "idle"});
+      sock.send(['RUNTIME', JSON.stringify(update)]).then(function() {
+        node.status({fill: "yellow", shape: "ring", text: "idle"});
+      }).catch(function(err) {
+        node.error(err);
+        node.status({fill: "red", shape: "dot", text: "error"});
+      });
+    });
+
+    node.on('close', function(done) {
+      sock.close();
+      done();
     });
   }
 

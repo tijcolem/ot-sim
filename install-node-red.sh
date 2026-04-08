@@ -11,13 +11,9 @@ if [[ ${TARGETARCH} = arm* ]]; then
   bash ./installer.sh --confirm-root --confirm-install --no-init \
     && rm installer.sh
 
-  apt install -y libzmq3-dev
-
   pushd /root/.node-red
 
-  npm install zeromq --zmq-shared
-
-  apt purge -y libzmq3-dev && apt autoremove -y
+  npm install zeromq@^6.0.0
 else
   echo "NOT BUILDING FOR ARM"
 
@@ -26,7 +22,7 @@ else
 
   pushd /root/.node-red
 
-  npm install zeromq
+  npm install zeromq@^6.0.0
 fi
 
 npm install \
