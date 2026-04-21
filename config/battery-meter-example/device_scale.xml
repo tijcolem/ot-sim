@@ -102,6 +102,7 @@
       IR 30022–30023 : meter-1.active-power (kW)
       IR 30024–30025 : meter-1.power-factor
       IR 30026–30027 : meter-1.frequency    (Hz)
+      IR 30028–30029 : meter-1.energy       (kWh, cumulative)
   -->
   <modbus name="modbus-outstation" mode="server">
     <endpoint>0.0.0.0:5502</endpoint>
@@ -173,6 +174,11 @@
     <register type="input">
       <address>30026</address>
       <tag>meter-1.frequency</tag>
+      <scaling>-2</scaling>
+    </register>
+    <register type="input">
+      <address>30028</address>
+      <tag>meter-1.energy</tag>
       <scaling>-2</scaling>
     </register>
   </modbus>

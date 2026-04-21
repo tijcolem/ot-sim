@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 from math import sqrt, log, floor
 from scipy.interpolate import pchip_interpolate
 
+from otsim.helics_helper     import DataType, HelicsFederate, Publication, Subscription
 from otsim.msgbus.envelope   import Envelope, Point
 from otsim.msgbus.pusher     import Pusher
 from otsim.msgbus.subscriber import Subscriber
@@ -243,7 +244,11 @@ class BatteryModel:
 
     if self.current_tag:
       self.subscriber = Subscriber(pub_endpoint)
+      # handle_update: receives current from Update envelopes (direct control commands)
+      # handle_status: receives current from Status envelopes published by the IO module
+      #                when it bridges OpenDSS HELICS subscriptions onto the msgbus
       self.subscriber.add_update_handler(self.handle_update)
+      self.subscriber.add_status_handler(self.handle_status)
     else:
       self.subscriber = None
 
@@ -274,29 +279,230 @@ class BatteryModel:
             self.current_cmd = float(point['value'])
 
 
+  def handle_status(self: BatteryModel, env: Envelope):
+    '''Receive current command published as a Status envelope by the IO module.
+
+    The IO module's action_subscriptions() pushes a Status envelope onto the
+    msgbus for every HELICS time grant.  Handling it here drives one battery
+    step per OpenDSS time step, matching the power_output.py pattern.
+    '''
+    status = envelope.status_from_envelope(env)
+
+    if status:
+      for point in status.get('measurements', []):
+        if self.current_tag and point['tag'] == self.current_tag:
+          with self.mutex:
+            self.current_cmd = float(point['value'])
+          self._do_step()
+          break
+
+
+  def _do_step(self: BatteryModel):
+    '''Advance the battery model by one dt and publish results onto the msgbus.'''
+    with self.mutex:
+      current = self.current_cmd
+
+    try:
+      [i_out, v_out, soc] = _battery_pack_model(current, self.soc, self.dt)
+      self.soc = soc
+    except Exception as exc:
+      print(f'[{self.name}] battery model error: {exc}')
+      return
+
+    points: typing.List[Point] = [
+      {'tag': self.voltage_tag,     'value': v_out, 'ts': 0},
+      {'tag': self.current_out_tag, 'value': i_out, 'ts': 0},
+      {'tag': self.soc_tag,         'value': soc,   'ts': 0},
+    ]
+
+    env = envelope.new_status_envelope(self.name, {'measurements': points})
+    self.pusher.push('RUNTIME', env)
+
+    env = envelope.new_update_envelope(self.name, {'updates': points})
+    self.pusher.push('RUNTIME', env)
+
+
   def run(self: BatteryModel):
+    # When current_tag is configured a subscriber is active and battery steps
+    # are driven by incoming messages (handle_status for IO/HELICS, handle_update
+    # for direct control).  Fall back to a wall-clock timer only in standalone
+    # mode where no external current source is wired up.
+    if self.subscriber:
+      return
+
     while self.running:
-      with self.mutex:
-        current = self.current_cmd
-
-      try:
-        [i_out, v_out, soc] = _battery_pack_model(current, self.soc, self.dt)
-        self.soc = soc
-      except Exception as exc:
-        print(f'[{self.name}] battery model error: {exc}')
-        time.sleep(self.dt)
-        continue
-
-      points: typing.List[Point] = [
-        {'tag': self.voltage_tag,     'value': v_out,  'ts': 0},
-        {'tag': self.current_out_tag, 'value': i_out,  'ts': 0},
-        {'tag': self.soc_tag,         'value': soc,    'ts': 0},
-      ]
-
-      env = envelope.new_status_envelope(self.name, {'measurements': points})
-      self.pusher.push('RUNTIME', env)
-
+      self._do_step()
       time.sleep(self.dt)
+
+
+# ── HELICS co-simulation federate ─────────────────────────────────────────────
+
+class BatteryModelFederate(HelicsFederate):
+  """Battery model that synchronises with an OpenDSS co-simulation via HELICS.
+
+  Each HELICS time grant corresponds to one battery model time step (dt).
+  The current command is read from a HELICS subscription published by OpenDSS.
+  Battery outputs (voltage, current, SOC) are published back to HELICS and
+  also pushed onto the OT-sim message bus as a Status envelope.
+
+  XML configuration example::
+
+    <battery-model name="battery-helics">
+      <initial-soc>0.5</initial-soc>
+      <current-tag>battery.current.cmd</current-tag>
+      <voltage-tag>battery.voltage</voltage-tag>
+      <current-out-tag>battery.current</current-out-tag>
+      <soc-tag>battery.soc</soc-tag>
+      <helics>
+        <broker-endpoint>127.0.0.1</broker-endpoint>
+        <federate-name>battery-model</federate-name>
+        <federate-log-level>SUMMARY</federate-log-level>
+        <start-time>1</start-time>
+        <end-time>3600</end-time>
+        <step-time>60</step-time>
+        <real-time>false</real-time>
+        <!-- tag must match current-tag above -->
+        <subscription key="OpenDSS/battery.current.cmd" type="double" tag="battery.current.cmd"/>
+        <!-- tags must match voltage-tag / current-out-tag / soc-tag above -->
+        <publication key="battery.voltage"  type="double" tag="battery.voltage"/>
+        <publication key="battery.current"  type="double" tag="battery.current"/>
+        <publication key="battery.soc"      type="double" tag="battery.soc"/>
+      </helics>
+    </battery-model>
+  """
+
+  @staticmethod
+  def _parse_type(typ: str) -> DataType:
+    if typ == 'boolean':
+      return DataType.boolean
+    return DataType.double
+
+
+  def __init__(self: 'BatteryModelFederate', pub: str, pull: str, el: ET.Element):
+    self.name = el.get('name', default='ot-sim-battery-model-helics')
+
+    self.soc         = float(el.findtext('initial-soc', default='0.5'))
+    self.current_tag = el.findtext('current-tag')
+
+    self.voltage_tag     = el.findtext('voltage-tag',     default='battery.voltage')
+    self.current_out_tag = el.findtext('current-out-tag', default='battery.current')
+    self.soc_tag         = el.findtext('soc-tag',         default='battery.soc')
+
+    # Battery state – updated each time step by action_post_request_time.
+    self.current_cmd = 0.0
+    self.v_out       = 0.0
+    self.i_out       = 0.0
+
+    # HELICS key → OT-sim tag mappings (built from <subscription>/<publication>).
+    self.sub_keys: typing.Dict[str, str] = {}
+    self.pub_keys: typing.Dict[str, str] = {}
+
+    helics_el = el.find('helics')
+    assert helics_el is not None, '<helics> element required for co-simulation mode'
+
+    broker        = helics_el.findtext('broker-endpoint',    default='127.0.0.1')
+    log_level     = helics_el.findtext('federate-log-level', default='SUMMARY')
+    federate_name = helics_el.findtext('federate-name',      default=self.name)
+    start         = int(helics_el.findtext('start-time',     default='1'))
+    end           = int(helics_el.findtext('end-time',       default='3600'))
+    step          = int(helics_el.findtext('step-time',      default='60'))
+    real_time_str = helics_el.findtext('real-time',          default='false')
+
+    self.dt = float(step)
+
+    HelicsFederate.federate_name                  = federate_name
+    HelicsFederate.federate_info_core_init_string = f'--federates=1 --broker={broker} --loglevel={log_level}'
+    HelicsFederate.federate_info_log_level        = log_level
+    HelicsFederate.federate_info_real_time        = real_time_str.lower() in ['true', 'yes', '1']
+    HelicsFederate.start_time                     = start
+    HelicsFederate.end_time                       = end
+    HelicsFederate.step_time                      = step
+    HelicsFederate.subscriptions                  = []
+    HelicsFederate.publications                   = []
+
+    for s in helics_el.findall('subscription'):
+      key = s.findtext('key')
+      typ = BatteryModelFederate._parse_type(s.findtext('type', default='double'))
+      tag = s.findtext('tag') or key.split('/')[-1]
+
+      HelicsFederate.subscriptions.append(Subscription(key, typ))
+      self.sub_keys[key] = tag
+
+    for p in helics_el.findall('publication'):
+      key = p.findtext('key')
+      typ = BatteryModelFederate._parse_type(p.findtext('type', default='double'))
+      tag = p.findtext('tag') or key
+
+      HelicsFederate.publications.append(Publication(key, typ))
+      self.pub_keys[key] = tag
+
+    HelicsFederate.__init__(self, module_name=self.name)
+
+    pub_endpoint  = helics_el.findtext('pub-endpoint',  default=pub)
+    pull_endpoint = helics_el.findtext('pull-endpoint', default=pull)
+
+    self.pusher = Pusher(pull_endpoint)
+
+
+  def start(self: 'BatteryModelFederate'):
+    threading.Thread(target=self.run, daemon=True).start()
+
+
+  def stop(self: 'BatteryModelFederate'):
+    pass  # HELICS run loop terminates naturally when end_time is reached.
+
+
+  def action_subscriptions(self: 'BatteryModelFederate', data: typing.Dict, ts: float):
+    """Read new current command from HELICS subscriptions."""
+    for key, value in data.items():
+      if value is None:
+        continue
+      tag = self.sub_keys.get(key)
+      if tag and tag == self.current_tag:
+        self.current_cmd = float(value)
+
+
+  def action_publications(self: 'BatteryModelFederate', data: typing.Dict, ts: float):
+    """Populate HELICS publications with the latest battery outputs."""
+    for key, tag in self.pub_keys.items():
+      if tag == self.voltage_tag:
+        data[key] = self.v_out
+      elif tag == self.current_out_tag:
+        data[key] = self.i_out
+      elif tag == self.soc_tag:
+        data[key] = self.soc
+
+
+  def action_post_request_time(self: 'BatteryModelFederate'):
+    """Advance the battery model by one HELICS time step and push results to msgbus."""
+    try:
+      [i_out, v_out, soc] = _battery_pack_model(self.current_cmd, self.soc, self.dt)
+      self.soc   = soc
+      self.v_out = v_out
+      self.i_out = i_out
+    except Exception as exc:
+      print(f'[{self.name}] battery model error: {exc}')
+      return
+
+    points: typing.List[Point] = [
+      {'tag': self.voltage_tag,     'value': self.v_out, 'ts': 0},
+      {'tag': self.current_out_tag, 'value': self.i_out, 'ts': 0},
+      {'tag': self.soc_tag,         'value': self.soc,   'ts': 0},
+    ]
+
+    env = envelope.new_status_envelope(self.name, {'measurements': points})
+    self.pusher.push('RUNTIME', env)
+
+    env = envelope.new_update_envelope(self.name, {'updates': points})
+    self.pusher.push('RUNTIME', env)
+
+
+  def action_endpoints_send(self: 'BatteryModelFederate', endpoints: typing.Dict, ts: float):
+    pass
+
+
+  def action_endpoints_recv(self: 'BatteryModelFederate', endpoints: typing.Dict, ts: float):
+    pass
 
 
 def main():
@@ -318,10 +524,13 @@ def main():
     pub  = 'tcp://127.0.0.1:5678'
     pull = 'tcp://127.0.0.1:1234'
 
-  modules: typing.List[BatteryModel] = []
+  modules: typing.List[typing.Union[BatteryModel, BatteryModelFederate]] = []
 
   for bm in root.findall('battery-model'):
-    module = BatteryModel(pub, pull, bm)
+    if bm.find('helics') is not None:
+      module: typing.Union[BatteryModel, BatteryModelFederate] = BatteryModelFederate(pub, pull, bm)
+    else:
+      module = BatteryModel(pub, pull, bm)
     module.start()
 
     modules.append(module)

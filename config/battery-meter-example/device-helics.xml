@@ -11,23 +11,21 @@
     <module name="meter">ot-sim-meter-sim-module {{config_file}}</module>
     <module name="modbus">ot-sim-modbus-module {{config_file}}</module>
     <module name="telnet">ot-sim-telnet-module {{config_file}}</module>
+    <module name="io">ot-sim-io-module {{config_file}}</module>
   </cpu>
 
   <!--
     Battery Model
     =============
-    Simulates a 660 kWh / 400 V lithium-ion battery pack (physics-based cell
-    model).  The module publishes voltage, current, and state-of-charge every
-    <dt> seconds and optionally accepts a current setpoint via OT-sim Update
-    messages on <current-tag>.
+    In this HELICS configuration the current command originates from OpenDSS
+    (via the IO module subscription below) rather than from a local Update
+    write.  The IO module delivers each HELICS time grant as a Status envelope;
+    handle_status() in the battery model fires _do_step() on every grant,
+    keeping battery physics in lock-step with the OpenDSS time steps.
 
-    initial-soc : starting state-of-charge (0.0–1.0)
-    dt          : simulation timestep in seconds (also the publish interval)
-    current-tag : tag whose Update values drive the charge/discharge current (A)
-                  positive = discharging, negative = charging
-    voltage-tag     : published terminal voltage (V)
-    current-out-tag : published actual current (A)
-    soc-tag         : published state-of-charge (0.0–1.0)
+    Battery outputs (voltage, current, SOC) are pushed onto the msgbus as
+    Update envelopes each step so that the IO module can forward them back to
+    HELICS via its publication entries below.
   -->
   <battery-model name="bess-1">
     <initial-soc>0.8</initial-soc>
@@ -41,25 +39,8 @@
   <!--
     Meter Simulator
     ===============
-    Simulates a three-phase power meter.  Readings are published to the OT-sim
-    message bus and exposed as Modbus TCP holding registers (float32 big-endian,
-    two registers per value) starting at address 0:
-
-      HR 0–1   : voltage L1 (V)
-      HR 2–3   : voltage L2 (V)
-      HR 4–5   : voltage L3 (V)
-      HR 6–7   : current L1 (A)
-      HR 8–9   : current L2 (A)
-      HR 10–11 : current L3 (A)
-      HR 12–13 : total active power (kW)
-      HR 14–15 : power factor
-      HR 16–17 : frequency (Hz)
-      HR 18–19 : energy (kWh, cumulative)
-
-    listen-address  : IP to bind the Modbus TCP server
-    port            : Modbus TCP port
-    unit-id         : Modbus unit / slave ID
-    update-interval : seconds between meter reading updates
+    Publishes simulated three-phase meter readings onto the msgbus and exposes
+    them as Modbus TCP holding registers (see Modbus block below).
   -->
   <meter-sim name="meter-1">
     <listen-address>0.0.0.0</listen-address>
@@ -81,39 +62,27 @@
   </meter-sim>
 
   <!--
-    Modbus outstation exposing battery and meter tags to external clients.
+    Modbus outstation (identical register map to device.xml).
 
-    Battery registers (read-only float32, use: mbpoll -0 -1 -t 3 -r <addr> -c 2 -p 5502 localhost):
+    Battery registers (read-only float32):
       IR 30000–30001 : bess-1.voltage      (V,   float32)
       IR 30002–30003 : bess-1.current      (A,   float32)
       IR 30004–30005 : bess-1.soc          (0–1, float32)
 
-    Battery current setpoint (read/write coil drives current-cmd update):
+    Battery current setpoint (read/write coil):
       Coil 0 : bess-1.current-cmd  (1 = discharge, 0 = idle)
-      Write : mbpoll -0 -1 -t 0 -r 0 -p 5502 localhost 1
 
     Meter registers (read-only float32):
-      IR 30010–30011 : meter-1.voltage-l1   (V)
-      IR 30012–30013 : meter-1.voltage-l2   (V)
-      IR 30014–30015 : meter-1.voltage-l3   (V)
-      IR 30016–30017 : meter-1.current-l1   (A)
-      IR 30018–30019 : meter-1.current-l2   (A)
-      IR 30020–30021 : meter-1.current-l3   (A)
-      IR 30022–30023 : meter-1.active-power (kW)
-      IR 30024–30025 : meter-1.power-factor
-      IR 30026–30027 : meter-1.frequency    (Hz)
-      IR 30028–30029 : meter-1.energy       (kWh, cumulative)
+      IR 30010–30029 : meter-1 readings (see device.xml for full map)
   -->
   <modbus name="modbus-outstation" mode="server">
     <endpoint>0.0.0.0:5502</endpoint>
 
-    <!-- battery: write coil to command a discharge current -->
     <register type="coil">
       <address>0</address>
       <tag>bess-1.current-cmd</tag>
     </register>
 
-    <!-- battery: read-only status -->
     <register type="input" data-type="float">
       <address>30000</address>
       <tag>bess-1.voltage</tag>
@@ -127,7 +96,6 @@
       <tag>bess-1.soc</tag>
     </register>
 
-    <!-- meter: read-only status -->
     <register type="input" data-type="float">
       <address>30010</address>
       <tag>meter-1.voltage-l1</tag>
@@ -174,4 +142,70 @@
     <endpoint>:23</endpoint>
     <banner>default</banner>
   </telnet>
+
+  <!--
+    IO / HELICS Federate
+    ====================
+    Bridges the OT-sim message bus to a HELICS co-simulation brokered at
+    <broker-endpoint>.  Update the broker-endpoint, federate-name, start-time,
+    end-time, and real-time values to match your HELICS broker configuration.
+
+    Data flow
+    ---------
+    OpenDSS → HELICS subscription → IO module → Status envelope on msgbus
+      └─ battery model handle_status() reads bess-1.current-cmd
+           └─ _do_step() runs the physics, publishes an Update envelope for
+              bess-1.voltage / bess-1.current / bess-1.soc
+
+    Update envelope on msgbus → IO module action_publications() → HELICS
+      └─ OpenDSS (or any other federate) can subscribe to these values using
+         the federate-name prefix, e.g. bess-1/bess-1.voltage
+
+    Note: the IO module's publication mechanism is driven by Update envelopes.
+    Ensure the battery model (or a logic module) pushes Update envelopes—not
+    only Status envelopes—for the three output tags when each step completes.
+  -->
+  <io name="helics-federate">
+    <broker-endpoint>127.0.0.1</broker-endpoint>
+    <federate-name>bess-1</federate-name>
+    <federate-log-level>SUMMARY</federate-log-level>
+    <start-time>0</start-time>
+    <end-time>3600</end-time>
+    <real-time>true</real-time>
+
+    <!--
+      Subscription: OpenDSS publishes the battery current setpoint.
+      The IO module pushes this as a Status envelope every time grant;
+      BatteryModel.handle_status() fires _do_step() on receipt.
+    -->
+    <subscription>
+      <key>OpenDSS/bess-1.current-cmd</key>
+      <type>double</type>
+      <tag>bess-1.current-cmd</tag>
+    </subscription>
+
+    <!--
+      Publications: battery model outputs sent back to HELICS each step.
+      OpenDSS (or any co-sim federate) subscribes using keys of the form:
+        bess-1/bess-1.voltage
+        bess-1/bess-1.current
+        bess-1/bess-1.soc
+    -->
+    <publication>
+      <key>bess-1.voltage</key>
+      <type>double</type>
+      <tag>bess-1.voltage</tag>
+    </publication>
+    <publication>
+      <key>bess-1.current</key>
+      <type>double</type>
+      <tag>bess-1.current</tag>
+    </publication>
+    <publication>
+      <key>bess-1.soc</key>
+      <type>double</type>
+      <tag>bess-1.soc</tag>
+    </publication>
+  </io>
+
 </ot-sim>
