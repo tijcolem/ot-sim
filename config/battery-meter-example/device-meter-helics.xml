@@ -1,0 +1,91 @@
+<?xml version="1.0"?>
+<ot-sim>
+  <message-bus>
+    <pull-endpoint>tcp://127.0.0.1:1234</pull-endpoint>
+    <pub-endpoint>tcp://127.0.0.1:5678</pub-endpoint>
+  </message-bus>
+
+  <cpu>
+    <module name="backplane">ot-sim-message-bus {{config_file}}</module>
+    <module name="meter">ot-sim-meter-sim-helics-module {{config_file}}</module>
+    <module name="modbus">ot-sim-modbus-module {{config_file}}</module>
+    <module name="io">ot-sim-io-module {{config_file}}</module>
+  </cpu>
+
+  <!--
+    Meter Simulator (HELICS)
+    ========================
+    Receives Power Consumption (kWh) and Maximum Demand (kW) from OpenDSS via
+    the IO module and serves them as Modbus TCP holding registers:
+
+      HR 0–1 : meter-1.energy-consumption (kWh, float32)
+      HR 2–3 : meter-1.max-demand         (kW,  float32)
+
+    Registers are updated on every HELICS time grant (i.e. whenever the IO
+    module delivers a Status envelope carrying either tag).
+  -->
+  <meter-sim-helics name="meter-1">
+    <listen-address>0.0.0.0</listen-address>
+    <port>5020</port>
+    <unit-id>1</unit-id>
+    <tags>
+      <energy-consumption>meter-1.energy-consumption</energy-consumption>
+      <max-demand>meter-1.max-demand</max-demand>
+    </tags>
+  </meter-sim-helics>
+
+  <!--
+    Modbus outstation – re-exposes the meter values for external Modbus clients
+    on a second port.  Remove if the pymodbus server inside MeterSimHelics is
+    sufficient.
+
+    Read registers (mbpoll example):
+      mbpoll -0 -1 -t 3 -r 0 -c 4 -p 5502 localhost
+  -->
+  <modbus name="modbus-outstation" mode="server">
+    <endpoint>0.0.0.0:5502</endpoint>
+
+    <register type="input" data-type="float">
+      <address>0</address>
+      <tag>meter-1.energy-consumption</tag>
+    </register>
+    <register type="input" data-type="float">
+      <address>2</address>
+      <tag>meter-1.max-demand</tag>
+    </register>
+  </modbus>
+
+  <!--
+    IO / HELICS Federate
+    ====================
+    Subscribes to OpenDSS publications for energy consumption and maximum
+    demand.  Each HELICS time grant produces a Status envelope on the msgbus
+    that MeterSimHelics.handle_status() consumes to update the Modbus registers.
+
+    Adjust broker-endpoint, end-time, and real-time to match your HELICS broker.
+
+    OpenDSS key naming convention used here:
+      OpenDSS/<element>.<measurement>
+    Adapt the <key> values below to match whatever OpenDSS publishes.
+  -->
+  <io name="helics-federate">
+    <broker-endpoint>127.0.0.1</broker-endpoint>
+    <federate-name>meter-1</federate-name>
+    <federate-log-level>SUMMARY</federate-log-level>
+    <start-time>0</start-time>
+    <end-time>3600</end-time>
+    <real-time>true</real-time>
+
+    <subscription>
+      <key>OpenDSS/meter-1.energy-consumption</key>   <!-- change to CPO when implemented -->
+      <type>double</type>
+      <tag>meter-1.energy-consumption</tag>
+    </subscription>
+    <subscription>
+      <key>OpenDSS/meter-1.max-demand</key>  <!-- change to CPO when implemented -->
+      <type>double</type>
+      <tag>meter-1.max-demand</tag>
+    </subscription>
+  </io>
+
+</ot-sim>
