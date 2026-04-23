@@ -76,13 +76,60 @@
     <end-time>3600</end-time>
     <real-time>true</real-time>
 
+
+ <!-- CPO1 -->> 
     <subscription>
-      <key>OpenDSS/meter-1.energy-consumption</key>   <!-- change to CPO when implemented -->
+      <key>EVSE1/meter-1.energy-consumption</key>   <!-- change to CPO when implemented -->
+      <type>double</type>
+      <tag>meter-1.energy-consumption-kw</tag>
+    </subscription>
+
+      <subscription>
+      <key>EVSE2/meter-1.energy-consumption</key>   <!-- change to CPO when implemented -->
+      <type>double</type>
+      <tag>meter-1.energy-consumption</tag>
+    </subscription>
+
+      <subscription>
+      <key>EVSE3/meter-1.energy-consumption</key>   <!-- change to CPO when implemented -->
+      <type>double</type>
+      <tag>meter-1.energy-consumption</tag>
+    </subscription>
+
+
+
+
+    <subscription>
+      <key>CPO1/meter-1.energy-consumption</key>   <!-- change to CPO when implemented -->
       <type>double</type>
       <tag>meter-1.energy-consumption</tag>
     </subscription>
     <subscription>
-      <key>OpenDSS/meter-1.max-demand</key>  <!-- change to CPO when implemented -->
+      <key>CPO1/meter-1.max-demand</key>  <!-- change to CPO when implemented -->
+      <type>double</type>
+      <tag>meter-1.max-demand</tag>
+    </subscription>
+
+    <subscription>
+      <key>CPO1/meter-1.energy-consumption</key>   <!-- change to CPO when implemented -->
+      <type>double</type>
+      <tag>meter-1.energy-consumption</tag>
+    </subscription>
+    <subscription>
+      <key>CPO1/meter-1.max-demand</key>  <!-- change to CPO when implemented -->
+      <type>double</type>
+      <tag>meter-1.max-demand</tag>
+    </subscription>
+
+
+
+    <subscription>
+      <key>CPO1/meter-1.energy-consumption</key>   <!-- change to CPO when implemented -->
+      <type>double</type>
+      <tag>meter-1.energy-consumption</tag>
+    </subscription>
+    <subscription>
+      <key>CPO1/meter-1.max-demand</key>  <!-- change to CPO when implemented -->
       <type>double</type>
       <tag>meter-1.max-demand</tag>
     </subscription>
