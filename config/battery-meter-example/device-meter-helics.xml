@@ -15,14 +15,17 @@
   <!--
     Meter Simulator (HELICS)
     ========================
-    Receives Power Consumption (kWh) and Maximum Demand (kW) from OpenDSS via
-    the IO module and serves them as Modbus TCP holding registers:
+    Receives per-EV three-phase currents from HELICS (via IO), computes
+    aggregate fleet power and a rolling 1-minute energy usage, and exposes
+    all values as Modbus TCP holding registers:
 
-      HR 0–1 : meter-1.energy-consumption (kWh, float32)
-      HR 2–3 : meter-1.max-demand         (kW,  float32)
+      HR 0-1 : meter-1.energy-consumption  (kWh, float32, passthrough)
+      HR 2-3 : meter-1.max-demand          (kW,  float32, peak computed)
+      HR 4-5 : meter-1.total-watts         (W,   float32, computed)
+      HR 6-7 : meter-1.one-minute-usage    (Wh,  float32, rolling 1-min avg)
 
-    Registers are updated on every HELICS time grant (i.e. whenever the IO
-    module delivers a Status envelope carrying either tag).
+    Computed tags are also published to the OT-sim message bus so the
+    Modbus outstation below can re-expose them to external clients.
   -->
   <meter-sim-helics name="meter-1">
     <listen-address>0.0.0.0</listen-address>
@@ -31,16 +34,24 @@
     <tags>
       <energy-consumption>meter-1.energy-consumption</energy-consumption>
       <max-demand>meter-1.max-demand</max-demand>
+      <total-watts>meter-1.total-watts</total-watts>
+      <one-minute-usage>meter-1.one-minute-usage</one-minute-usage>
     </tags>
   </meter-sim-helics>
 
   <!--
-    Modbus outstation – re-exposes the meter values for external Modbus clients
+    Modbus outstation – re-exposes all meter values for external Modbus clients
     on a second port.  Remove if the pymodbus server inside MeterSimHelics is
     sufficient.
 
-    Read registers (mbpoll example):
-      mbpoll -0 -1 -t 3 -r 0 -c 4 -p 5502 localhost
+    Register map (input registers, float32 big-endian):
+      IR 30000-30001 : meter-1.energy-consumption  (kWh)
+      IR 30002-30003 : meter-1.max-demand          (kW)
+      IR 30004-30005 : meter-1.total-watts         (W)
+      IR 30006-30007 : meter-1.one-minute-usage    (Wh)
+
+    Read all with mbpoll:
+      mbpoll -0 -1 -t 3 -r 0 -c 8 -p 5502 localhost
   -->
   <modbus name="modbus-outstation" mode="server">
     <endpoint>0.0.0.0:5502</endpoint>
@@ -52,6 +63,14 @@
     <register type="input" data-type="float">
       <address>2</address>
       <tag>meter-1.max-demand</tag>
+    </register>
+    <register type="input" data-type="float">
+      <address>4</address>
+      <tag>meter-1.total-watts</tag>
+    </register>
+    <register type="input" data-type="float">
+      <address>6</address>
+      <tag>meter-1.one-minute-usage</tag>
     </register>
   </modbus>
 
@@ -76,62 +95,67 @@
     <end-time>3600</end-time>
     <real-time>true</real-time>
 
-
- <!-- CPO1 -->> 
+    <!-- Meter totals from upstream (optional passthrough) -->
     <subscription>
-      <key>EVSE1/meter-1.energy-consumption</key>   <!-- change to CPO when implemented -->
-      <type>double</type>
-      <tag>meter-1.energy-consumption-kw</tag>
-    </subscription>
-
-      <subscription>
-      <key>EVSE2/meter-1.energy-consumption</key>   <!-- change to CPO when implemented -->
-      <type>double</type>
-      <tag>meter-1.energy-consumption</tag>
-    </subscription>
-
-      <subscription>
-      <key>EVSE3/meter-1.energy-consumption</key>   <!-- change to CPO when implemented -->
-      <type>double</type>
-      <tag>meter-1.energy-consumption</tag>
-    </subscription>
-
-
-
-
-    <subscription>
-      <key>CPO1/meter-1.energy-consumption</key>   <!-- change to CPO when implemented -->
+      <key>CPO1/meter-1.energy-consumption</key>
       <type>double</type>
       <tag>meter-1.energy-consumption</tag>
     </subscription>
     <subscription>
-      <key>CPO1/meter-1.max-demand</key>  <!-- change to CPO when implemented -->
+      <key>CPO1/meter-1.max-demand</key>
       <type>double</type>
       <tag>meter-1.max-demand</tag>
     </subscription>
 
+    <!-- EVSE1 three-phase current -->
     <subscription>
-      <key>CPO1/meter-1.energy-consumption</key>   <!-- change to CPO when implemented -->
+      <key>EVSE1/meter-1.current-l1</key>
       <type>double</type>
-      <tag>meter-1.energy-consumption</tag>
+      <tag>evse-1.current-l1</tag>
     </subscription>
     <subscription>
-      <key>CPO1/meter-1.max-demand</key>  <!-- change to CPO when implemented -->
+      <key>EVSE1/meter-1.current-l2</key>
       <type>double</type>
-      <tag>meter-1.max-demand</tag>
-    </subscription>
-
-
-
-    <subscription>
-      <key>CPO1/meter-1.energy-consumption</key>   <!-- change to CPO when implemented -->
-      <type>double</type>
-      <tag>meter-1.energy-consumption</tag>
+      <tag>evse-1.current-l2</tag>
     </subscription>
     <subscription>
-      <key>CPO1/meter-1.max-demand</key>  <!-- change to CPO when implemented -->
+      <key>EVSE1/meter-1.current-l3</key>
       <type>double</type>
-      <tag>meter-1.max-demand</tag>
+      <tag>evse-1.current-l3</tag>
+    </subscription>
+
+    <!-- EVSE2 three-phase current -->
+    <subscription>
+      <key>EVSE2/meter-1.current-l1</key>
+      <type>double</type>
+      <tag>evse-2.current-l1</tag>
+    </subscription>
+    <subscription>
+      <key>EVSE2/meter-1.current-l2</key>
+      <type>double</type>
+      <tag>evse-2.current-l2</tag>
+    </subscription>
+    <subscription>
+      <key>EVSE2/meter-1.current-l3</key>
+      <type>double</type>
+      <tag>evse-2.current-l3</tag>
+    </subscription>
+
+    <!-- EVSE3 three-phase current -->
+    <subscription>
+      <key>EVSE3/meter-1.current-l1</key>
+      <type>double</type>
+      <tag>evse-3.current-l1</tag>
+    </subscription>
+    <subscription>
+      <key>EVSE3/meter-1.current-l2</key>
+      <type>double</type>
+      <tag>evse-3.current-l2</tag>
+    </subscription>
+    <subscription>
+      <key>EVSE3/meter-1.current-l3</key>
+      <type>double</type>
+      <tag>evse-3.current-l3</tag>
     </subscription>
   </io>
 
