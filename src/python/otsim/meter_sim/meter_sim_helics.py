@@ -4,21 +4,12 @@ from __future__ import annotations
 Meter Simulator with HELICS integration - OT-sim module.
 
 Receives values from HELICS (via the IO module), computes aggregate load for
-multiple EVs from three-phase currents, and exposes values as Modbus TCP
-holding registers.
-
-Modbus holding registers (float32, big-endian, two regs each):
-  HR 0-1 : energy-consumption (kWh, passthrough)
-  HR 2-3 : max-demand         (kW, max observed)
-  HR 4-5 : total-watts        (W, aggregate across EVs)
-  HR 6-7 : one-minute-usage   (Wh, rolling 1-minute usage)
+multiple EVs from three-phase currents, and publishes computed values via the
+ot-sim message bus.
 
 XML configuration example::
 
   <meter-sim-helics name="meter-1">
-    <listen-address>0.0.0.0</listen-address>
-    <port>5020</port>
-    <unit-id>1</unit-id>
     <tags>
       <energy-consumption>meter-1.energy-consumption</energy-consumption>
       <max-demand>meter-1.max-demand</max-demand>
@@ -51,7 +42,7 @@ The IO module must map HELICS keys to these tags:
   </subscription>
 """
 
-import signal, struct, sys, threading, time, typing
+import signal, sys, threading, time, typing
 from collections import deque
 
 import otsim.msgbus.envelope as envelope
@@ -61,22 +52,8 @@ from otsim.msgbus.envelope   import Envelope, Point
 from otsim.msgbus.pusher     import Pusher
 from otsim.msgbus.subscriber import Subscriber
 
-from pymodbus.datastore import (
-    ModbusSequentialDataBlock,
-    ModbusDeviceContext,
-    ModbusServerContext,
-)
-from pymodbus.server import StartTcpServer
-
-
 DEFAULT_PUB_ENDPOINT = 'tcp://127.0.0.1:5678'
 DEFAULT_PULL_ENDPOINT = 'tcp://127.0.0.1:1234'
-
-
-def _float_to_registers(value: float) -> typing.List[int]:
-    packed    = struct.pack('>f', float(value))
-    high, low = struct.unpack('>HH', packed)
-    return [high, low]
 
 
 def _read_endpoint(el: ET.Element, tag: str, default: str) -> str:
@@ -90,15 +67,12 @@ def _read_endpoint(el: ET.Element, tag: str, default: str) -> str:
 
 class MeterSimHelics:
   """Receives energy-consumption and max-demand from HELICS via the IO module
-  and exposes them as Modbus TCP holding registers."""
+  and publishes computed values via the ot-sim message bus."""
 
   def __init__(self: 'MeterSimHelics', pub: str, pull: str, el: ET.Element):
     self.running = False
 
-    self.name    = el.get('name', default='ot-sim-meter-sim-helics')
-    self.address = el.findtext('listen-address', default='0.0.0.0')
-    self.port    = int(el.findtext('port',        default='5020'))
-    self.unit_id = int(el.findtext('unit-id',     default='1'))
+    self.name = el.get('name', default='ot-sim-meter-sim-helics')
 
     tags = el.find('tags') or ET.Element('tags')
 
@@ -123,10 +97,6 @@ class MeterSimHelics:
     self._ev_phase_currents: typing.Dict[str, typing.Dict[str, float]] = {}
     self._watts_history: typing.Deque[typing.Tuple[float, float]] = deque()
 
-    block        = ModbusSequentialDataBlock(0, [0] * 8)
-    store        = ModbusDeviceContext(hr=block)
-    self.context = ModbusServerContext(devices={self.unit_id: store}, single=False)
-
     pub_endpoint  = _read_endpoint(el, 'pub-endpoint',  pub)
     pull_endpoint = _read_endpoint(el, 'pull-endpoint', pull)
     self.subscriber = Subscriber(pub_endpoint)
@@ -137,7 +107,6 @@ class MeterSimHelics:
   def start(self: 'MeterSimHelics'):
     self.running = True
     self.subscriber.start('RUNTIME')
-    threading.Thread(target=self._serve, daemon=True).start()
 
 
   def stop(self: 'MeterSimHelics'):
@@ -170,7 +139,6 @@ class MeterSimHelics:
 
     if updated:
       self._recompute_totals()
-      self._write_registers()
       self._publish_computed()
 
 
@@ -242,26 +210,6 @@ class MeterSimHelics:
     ]
     env = envelope.new_status_envelope(self.name, {'measurements': points})
     self.pusher.push('RUNTIME', env)
-
-
-  def _write_registers(self: 'MeterSimHelics'):
-    with self._lock:
-      ec = self._energy_consumption
-      md = self._max_demand
-      tw = self._total_watts
-      one_min_wh = self._one_minute_usage_wh
-
-    registers = (
-      _float_to_registers(ec) +
-      _float_to_registers(md) +
-      _float_to_registers(tw) +
-      _float_to_registers(one_min_wh)
-    )
-    self.context[self.unit_id].setValues(3, 0, registers)
-
-
-  def _serve(self: 'MeterSimHelics'):
-    StartTcpServer(context=self.context, address=(self.address, self.port))
 
 
 def main():
